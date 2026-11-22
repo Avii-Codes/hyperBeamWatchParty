@@ -1,6 +1,9 @@
 import './style.css';
 import { getUsername, setUsername, formatTime, getRoomUrl, escHtml, copyToClipboard, toast, extractYouTubeId } from './utils.js';
 import { RoomSocket } from './socket.js';
+import { initQueueSearch, openQueueSearch, closeQueueSearch, isQueueSearchActive } from './modules/ytSearch.js';
+import { initChatReplies, getReplyTarget, setReplyTarget, clearReplyTarget, renderQuoteHtml, wireQuoteClicks, attachMessageInteractions, initChatAutocomplete, isAutocompleteOpen } from './modules/chat.js';
+import { ANIMATED_EMOJI_WHITELIST, getCustomQuickEmojis, initEmojiDrawer, toggleEmojiDrawer, closeEmojiDrawer, isEmojiDrawerOpen } from './modules/emojiPicker.js';
 
 // ─── App state ────────────────────────────────────────────────────────────────
 let currentView = 'home'; // 'home' | 'room'
@@ -23,33 +26,7 @@ let lastKnownTimestamp = Date.now();
 // Track active Hyperbeam availability from server
 let currentHbInfo = { active: 0, max: 2, available: 2 };
 
-// ─── Curated Animated Emoji Whitelist & Reactions ─────────────────────────────
-const ANIMATED_EMOJI_WHITELIST = {
-  '🔥': '1f525',
-  '😂': '1f602',
-  '❤️': '2764_fe0f',
-  '❤': '2764_fe0f',
-  '😱': '1f631',
-  '👏': '1f44f',
-  '🎉': '1f389',
-  '😭': '1f62d',
-  '💀': '1f480',
-  '👍': '1f44d',
-  '👋': '1f44b',
-  '🍿': '1f37f'
-};
-
-const QUICK_REACTIONS = [
-  { emoji: '🔥', hex: '1f525' },
-  { emoji: '😂', hex: '1f602' },
-  { emoji: '❤️', hex: '2764_fe0f' },
-  { emoji: '😱', hex: '1f631' },
-  { emoji: '👏', hex: '1f44f' },
-  { emoji: '🎉', hex: '1f389' },
-  { emoji: '😭', hex: '1f62d' },
-  { emoji: '💀', hex: '1f480' },
-];
-
+// ─── Curated Animated Emoji Whitelist & Reactions (Imported from emojiPicker) ───
 const EMOJI_WHITELIST_KEYS = Object.keys(ANIMATED_EMOJI_WHITELIST).sort((a, b) => b.length - a.length);
 
 const ICON_JOIN = `<img class="system-animated-emoji" src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f389/512.webp" alt="🎉" />`;
@@ -540,16 +517,15 @@ function renderRoom() {
             </div>
           </div>
 
-          <!-- Center area: YouTube URL Input & Merged Add Button (Only visible in YouTube mode) -->
+          <!-- Center area: YouTube URL Input & Search Button (Only visible in YouTube mode) -->
           <div class="bar-center">
             <div class="yt-mode-controls hidden" id="yt-mode-controls">
-              <div class="yt-input-group">
-                <input class="yt-input" id="yt-url-input" type="text" placeholder="Paste YouTube link or ID (e.g. youtu.be/...)" />
-                <button class="yt-load-btn" id="yt-load-btn" title="Add video to room">
-                  <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <path d="M4 6h16M4 12h10M4 18h10M18 15v6M15 18h6"/>
+              <div class="yt-unified-search-bar" id="ctrl-bar-search-bar">
+                <input class="yt-unified-input" id="yt-url-input" type="text" placeholder="Search or paste YouTube link..." spellcheck="false" autocomplete="off" />
+                <button class="yt-unified-btn" id="yt-load-btn" title="Search or Add" aria-label="Search or Add">
+                  <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
                   </svg>
-                  <span>Add</span>
                 </button>
               </div>
             </div>
@@ -692,11 +668,26 @@ function renderRoom() {
             <div class="sidebar-panel sidebar-view panel-chat sidebar-chat-view" id="panel-chat" role="tabpanel">
               <div class="chat-messages" id="chat-messages"></div>
               
-              <!-- Quick Reaction Strip (8 curated reactions) -->
+              <!-- Active Reply Composer Bar (WhatsApp style) -->
+              <div class="chat-active-reply-bar hidden" id="chat-active-reply-bar">
+                <div class="reply-bar-indicator"></div>
+                <div class="reply-bar-info">
+                  <span class="reply-bar-label">Replying to <strong id="reply-bar-user"></strong></span>
+                  <span class="reply-bar-text" id="reply-bar-text"></span>
+                </div>
+                <button class="btn-icon btn-sm reply-bar-close" id="btn-close-reply-bar" title="Cancel reply" aria-label="Cancel reply">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </div>
+
+              <!-- Quick Reaction Strip (Curated reactions + Expand toggle) -->
               <div class="quick-reaction-strip" id="quick-reaction-strip"></div>
 
+              <!-- Integrated Expandable Emoji Drawer (Inline drawer above input) -->
+              <div class="chat-emoji-drawer" id="chat-emoji-drawer"></div>
+
               <div class="chat-input-area">
-                <textarea class="chat-textarea" id="chat-input" placeholder="Say something…" rows="1" maxlength="500"></textarea>
+                <textarea class="chat-textarea" id="chat-input" placeholder="Say something… (type / or @ for bot)" rows="1" maxlength="500" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off"></textarea>
                 <button class="chat-send-btn" id="chat-send" title="Send message" aria-label="Send message">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                     <line x1="22" y1="2" x2="11" y2="13"/>
@@ -706,41 +697,66 @@ function renderRoom() {
               </div>
             </div>
 
-            <!-- Panel 3: Embedded Video Queue -->
+            <!-- Panel 3: Embedded Video Queue & Search Area -->
             <div class="sidebar-panel sidebar-view panel-queue sidebar-queue-view" id="panel-queue" role="tabpanel">
-              <!-- 1. Header & Now Playing Section (Featured, larger embed) -->
-              <div class="queue-now-playing-wrap" id="queue-now-playing-wrap">
-                <div class="queue-section-header">
-                  <span class="queue-section-title-text">Now Playing</span>
-                  <span class="now-playing-live-pill"><span class="dot dot-pulse"></span> Live Sync</span>
-                </div>
-                <div class="queue-now-playing-card now-playing-featured" id="embedded-now-playing-card"></div>
-              </div>
-
-              <!-- 2. Queue Bar: "1 video in queue" along with Next and Clear options -->
-              <div class="queue-header-bar queue-sub-header">
-                <div class="queue-header-info">
-                  <span class="queue-count-label" id="queue-count-label">Queue</span>
-                </div>
-                <div class="queue-header-actions" id="queue-header-actions">
-                  <button class="btn btn-primary btn-sm btn-queue-action" id="btn-sidebar-play-next" style="padding:2px 8px;font-size:11px" title="Play next video in queue">▶ Next</button>
-                  <button class="btn btn-ghost btn-sm btn-queue-action" id="btn-clear-queue" style="padding:2px 8px;font-size:11px" title="Clear all videos from queue">Clear</button>
+              <!-- Top Unified Search Bar -->
+              <div class="queue-top-search-area">
+                <div class="yt-unified-search-bar" id="queue-search-bar">
+                  <input class="yt-unified-input" id="inp-queue-search" type="text" placeholder="Search YouTube or paste link..." spellcheck="false" autocomplete="off" />
+                  <button class="yt-unified-btn" id="btn-queue-search" title="Search or Add" aria-label="Search or Add">
+                    <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                      <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                    </svg>
+                  </button>
                 </div>
               </div>
 
-              <!-- 3. Scrollable List of Queued Videos -->
-              <div class="queue-scroll-area embedded-queue-list-wrap sidebar-queue-list-container" id="queue-scroll-area">
-                <div class="queue-list-container" id="queue-list-container">
-                  <!-- Populated dynamically -->
+              <!-- Normal Queue View (Now Playing + Queued List) -->
+              <div class="queue-normal-view" id="queue-normal-view">
+                <!-- 1. Header & Now Playing Section -->
+                <div class="queue-now-playing-wrap" id="queue-now-playing-wrap">
+                  <div class="queue-section-header">
+                    <span class="queue-section-title-text">Now Playing</span>
+                    <span class="now-playing-live-pill"><span class="dot dot-pulse"></span> Live Sync</span>
+                  </div>
+                  <div class="queue-now-playing-card now-playing-featured" id="embedded-now-playing-card"></div>
+                </div>
+
+                <!-- 2. Queue Bar: "1 video in queue" along with Next and Clear options -->
+                <div class="queue-header-bar queue-sub-header">
+                  <div class="queue-header-info">
+                    <span class="queue-count-label" id="queue-count-label">Queue</span>
+                  </div>
+                  <div class="queue-header-actions" id="queue-header-actions">
+                    <button class="btn btn-primary btn-sm btn-queue-action" id="btn-sidebar-play-next" style="padding:2px 8px;font-size:11px" title="Play next video in queue">▶ Next</button>
+                    <button class="btn btn-ghost btn-sm btn-queue-action" id="btn-clear-queue" style="padding:2px 8px;font-size:11px" title="Clear all videos from queue">Clear</button>
+                  </div>
+                </div>
+
+                <!-- 3. Scrollable List of Queued Videos -->
+                <div class="queue-scroll-area embedded-queue-list-wrap sidebar-queue-list-container" id="queue-scroll-area">
+                  <div class="queue-list-container" id="queue-list-container">
+                    <!-- Populated dynamically -->
+                  </div>
                 </div>
               </div>
 
-              <!-- 4. Dedicated Video Input Field & Add Button strictly BELOW the list of queued videos -->
-              <div class="queue-input-area sidebar-queue-add-box" id="queue-input-area">
-                <div class="queue-add-box">
-                  <input class="form-input sidebar-queue-input" id="inp-embedded-queue" placeholder="Paste YouTube link or ID..." autocomplete="off" />
-                  <button class="btn btn-primary btn-sm sidebar-queue-add-btn" id="btn-embedded-add-queue" style="white-space:nowrap">Add</button>
+              <!-- Search Mode View (Active during search) -->
+              <div class="queue-search-view hidden" id="queue-search-view">
+                <div class="queue-search-header-bar">
+                  <span class="queue-search-header-title">YouTube Search</span>
+                  <button class="queue-search-close-btn" id="btn-close-queue-search" title="Close search (back to queue)" aria-label="Close search">
+                    <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
+                      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                  </button>
                 </div>
+
+                <!-- Live Autocomplete Suggestion Chips -->
+                <div class="queue-search-chips-row hidden" id="queue-search-chips"></div>
+
+                <!-- Search Results List -->
+                <div class="queue-search-results-list" id="queue-search-results-list"></div>
               </div>
 
             </div>
@@ -967,22 +983,67 @@ async function initRoom(roomId) {
     const countBadge = document.getElementById('members-count-num');
     if (countBadge) countBadge.textContent = users.length;
 
-    container.innerHTML = users.map(u => {
+    // AI WatchBot Card at top
+    let html = `
+      <div class="member-card member-card-bot">
+        <div class="member-avatar member-avatar-bot">🤖</div>
+        <div class="member-info">
+          <div class="member-name-row">
+            <span class="member-name member-name-bot">WatchBot</span>
+            <span class="member-badge-ai">🤖 AI Bot</span>
+          </div>
+          <span class="member-status-sub">Commands: /play, /pause, /skip, @ai</span>
+        </div>
+        <button class="member-mention-btn" data-mention="ai" title="Mention WatchBot" aria-label="Mention WatchBot">
+          @
+        </button>
+      </div>
+    `;
+
+    // Active User Cards
+    html += users.map(u => {
       const isMe = u === currentUsername;
+      const isHost = currentRoom?.creator && u === currentRoom.creator;
       const initial = (u || '?')[0].toUpperCase();
+      const bg = getAvatarColor(u);
       return `
-        <div class="member-item">
-          <div class="member-avatar">${escHtml(initial)}</div>
+        <div class="member-card ${isMe ? 'member-card-me' : ''}">
+          <div class="member-avatar" style="background:${bg};">${escHtml(initial)}</div>
           <div class="member-info">
             <div class="member-name-row">
               <span class="member-name">${escHtml(u)}</span>
+              ${isHost ? '<span class="member-badge-host">👑 Host</span>' : ''}
               ${isMe ? '<span class="member-tag-you">You</span>' : ''}
             </div>
-            <span class="member-status"><span class="dot dot-pulse" style="color:var(--green)"></span> Watching</span>
+            <span class="member-status"><span class="dot dot-pulse" style="color:var(--green)"></span> Watching Live</span>
           </div>
+          ${!isMe ? `
+            <button class="member-mention-btn" data-mention="${escHtml(u)}" title="Mention @${escHtml(u)}" aria-label="Mention @${escHtml(u)}">
+              @
+            </button>
+          ` : ''}
         </div>
       `;
     }).join('');
+
+    container.innerHTML = html;
+
+    // Wire quick mention buttons to switch to chat and prefill input
+    container.querySelectorAll('.member-mention-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const target = btn.getAttribute('data-mention');
+        if (!target) return;
+        switchSidebarTab('chat');
+        const input = document.getElementById('chat-input');
+        if (input) {
+          const prefix = input.value && !input.value.endsWith(' ') ? `${input.value} ` : (input.value || '');
+          input.value = `${prefix}@${target} `;
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+        }
+      });
+    });
   }
 
   function switchSidebarTab(tab) {
@@ -1040,8 +1101,10 @@ async function initRoom(roomId) {
       track?.classList.add('slide-chat');
       tabChat?.classList.add('active');
       tabChat?.setAttribute('aria-selected', 'true');
+      tabChat?.classList.remove('has-unread-ping');
       mobChat?.classList.add('active');
       mobChat?.setAttribute('aria-selected', 'true');
+      mobChat?.classList.remove('has-unread-ping');
       unreadCount = 0;
       document.getElementById('player-chat-badge')?.classList.add('hidden');
       document.getElementById('mob-chat-badge')?.classList.add('hidden');
@@ -1433,13 +1496,15 @@ async function initRoom(roomId) {
     if (!strip) return;
     strip.innerHTML = '';
 
-    QUICK_REACTIONS.forEach(({ emoji, hex }) => {
+    const quickList = getCustomQuickEmojis();
+    quickList.forEach(emoji => {
+      const hex = ANIMATED_EMOJI_WHITELIST[emoji] || '1f525';
       const btn = document.createElement('button');
       btn.className = 'quick-reaction-btn';
       btn.type = 'button';
       btn.title = `Send ${emoji}`;
       btn.setAttribute('aria-label', `Send ${emoji}`);
-      btn.innerHTML = `<img src="https://fonts.gstatic.com/s/e/notoemoji/latest/${hex}/512.webp" alt="${emoji}" class="reaction-strip-icon" loading="lazy" onerror="this.replaceWith('${emoji}')" />`;
+      btn.innerHTML = `<img src="https://fonts.gstatic.com/s/e/notoemoji/latest/${hex}/512.webp" alt="${emoji}" class="reaction-strip-icon" width="22" height="22" loading="lazy" onerror="this.replaceWith('${emoji}')" />`;
 
       btn.addEventListener('click', () => {
         if (!roomSocket) return;
@@ -1448,20 +1513,63 @@ async function initRoom(roomId) {
 
       strip.appendChild(btn);
     });
+
+    // Dedicated More Emojis / Customize button
+    const moreBtn = document.createElement('button');
+    moreBtn.className = 'quick-reaction-btn quick-reaction-more-btn';
+    moreBtn.type = 'button';
+    moreBtn.title = 'More animated emojis & customize';
+    moreBtn.setAttribute('aria-label', 'More animated emojis');
+    moreBtn.innerHTML = `
+      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
+      </svg>
+      <span class="reaction-more-plus">+</span>
+    `;
+    moreBtn.addEventListener('click', () => {
+      toggleEmojiDrawer();
+    });
+    strip.appendChild(moreBtn);
   }
 
   renderAppDrawer();
   renderQuickReactionStrip();
 
+  // Initialize Integrated Expandable Emoji Drawer
+  initEmojiDrawer({
+    drawerEl: document.getElementById('chat-emoji-drawer'),
+    onSendEmoji: (emoji) => {
+      if (!roomSocket) return;
+      roomSocket.chat(emoji);
+    },
+    onQuickEmojisChanged: () => {
+      renderQuickReactionStrip();
+    },
+  });
+
+  // Close emoji drawer when tapping/clicking message list or input
+  document.getElementById('chat-messages')?.addEventListener('click', () => {
+    if (isEmojiDrawerOpen()) closeEmojiDrawer();
+  });
+
   // ── Send chat ──
   const chatInput = document.getElementById('chat-input');
   document.getElementById('chat-send').addEventListener('click', sendChat);
   chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      if (isAutocompleteOpen()) return;
+      e.preventDefault();
+      sendChat();
+    }
   });
   chatInput.addEventListener('input', () => {
     chatInput.style.height = 'auto';
     chatInput.style.height = Math.min(chatInput.scrollHeight, 100) + 'px';
+  });
+  initChatReplies({ onStateChange: () => {} });
+  initChatAutocomplete({
+    inputEl: chatInput,
+    getRoomUsers: () => currentRoom?.users || [],
   });
 
   // ── Mode Switcher Logic ──
@@ -1701,57 +1809,71 @@ async function initRoom(roomId) {
     roomSocket?.ytAction('queue_play_next');
   });
 
-  // Embedded queue add input handler (strictly below the queued videos list)
-  const embeddedQueueInp = document.getElementById('inp-embedded-queue');
-  const embeddedQueueBtn = document.getElementById('btn-embedded-add-queue');
-
-  function submitEmbeddedQueue() {
-    const raw = embeddedQueueInp?.value.trim();
-    if (!raw) return;
-    const vid = extractYouTubeId(raw);
-    if (!vid) {
-      toast('Please enter a valid YouTube video link or ID', 'error');
-      return;
-    }
-    roomSocket?.ytAction('queue_add', { videoId: vid });
-    if (embeddedQueueInp) embeddedQueueInp.value = '';
-    toast('Added video to queue! 📋', 'success');
-  }
-
-  embeddedQueueBtn?.addEventListener('click', submitEmbeddedQueue);
-  embeddedQueueInp?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      submitEmbeddedQueue();
-    }
+  // ── Integrated Queue Search & Discovery Engine ──
+  initQueueSearch({
+    searchInput: document.getElementById('inp-queue-search'),
+    searchBtn: document.getElementById('btn-queue-search'),
+    normalView: document.getElementById('queue-normal-view'),
+    searchView: document.getElementById('queue-search-view'),
+    chipsRow: document.getElementById('queue-search-chips'),
+    resultsList: document.getElementById('queue-search-results-list'),
+    closeSearchBtn: document.getElementById('btn-close-queue-search'),
+    onPlay: (vid, title) => {
+      roomSocket?.ytAction('change_video', { videoId: vid });
+      toast(`Playing "${title || 'video'}" 🎬`, 'success');
+    },
+    onQueue: (vid, title) => {
+      const isPlaying = Boolean((ytPlayer?.getPlayerState && ytPlayer.getPlayerState() === 1) || currentRoom?.ytState?.isPlaying);
+      const hasQueue = (currentRoom?.queue?.length || 0) > 0;
+      if (!isPlaying && !hasQueue) {
+        roomSocket?.ytAction('change_video', { videoId: vid });
+        toast(`Playing "${title || 'video'}" 🎬`, 'success');
+      } else {
+        roomSocket?.ytAction('queue_add', { videoId: vid });
+        toast(`Added "${title || 'video'}" to queue 📋`, 'success');
+      }
+    },
   });
 
-  // ── YouTube URL Input & Add Button ──
+  // ── Unified Control Bar YouTube Search / URL Input ──
   const ytUrlInput = document.getElementById('yt-url-input');
   const ytLoadBtn = document.getElementById('yt-load-btn');
 
-  function submitYouTubeUrl(rawVal) {
-    const vid = extractYouTubeId(rawVal);
-    if (!vid) {
-      toast('Please enter a valid YouTube video link or ID', 'error');
+  function submitControlBarInput() {
+    const rawVal = (ytUrlInput?.value || '').trim();
+    if (!rawVal) {
+      switchSidebarTab('queue');
+      openQueueSearch();
       return;
     }
-    const isPlaying = Boolean((ytPlayer?.getPlayerState && ytPlayer.getPlayerState() === 1) || currentRoom?.ytState?.isPlaying);
-    const hasQueue = (currentRoom?.queue?.length || 0) > 0;
 
-    if (isPlaying || hasQueue) {
-      roomSocket?.ytAction('queue_add', { videoId: vid });
-      toast('Added video to queue! 📋', 'success');
+    const vid = extractYouTubeId(rawVal);
+    if (vid) {
+      const isPlaying = Boolean((ytPlayer?.getPlayerState && ytPlayer.getPlayerState() === 1) || currentRoom?.ytState?.isPlaying);
+      const hasQueue = (currentRoom?.queue?.length || 0) > 0;
+
+      if (isPlaying || hasQueue) {
+        roomSocket?.ytAction('queue_add', { videoId: vid });
+        toast('Added video to queue! 📋', 'success');
+      } else {
+        roomSocket?.ytAction('change_video', { videoId: vid });
+        toast('Playing video… 🎬', 'success');
+      }
+      if (ytUrlInput) ytUrlInput.value = '';
     } else {
-      roomSocket?.ytAction('change_video', { videoId: vid });
-      toast('Playing video… 🎬', 'success');
+      // Direct search query: clear control bar input, switch to Queue tab, open Queue search!
+      if (ytUrlInput) ytUrlInput.value = '';
+      switchSidebarTab('queue');
+      openQueueSearch(rawVal);
     }
-    if (ytUrlInput) ytUrlInput.value = '';
   }
 
-  ytLoadBtn?.addEventListener('click', () => submitYouTubeUrl(ytUrlInput?.value));
+  ytLoadBtn?.addEventListener('click', submitControlBarInput);
   ytUrlInput?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submitYouTubeUrl(ytUrlInput?.value);
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitControlBarInput();
+    }
   });
 
   // ── YouTube Play/Pause, Seek & Queue Controls ──
@@ -2167,7 +2289,9 @@ function sendChat() {
   const input = document.getElementById('chat-input');
   const text = input?.value.trim();
   if (!text || !roomSocket) return;
-  roomSocket.chat(text);
+  const replyTarget = getReplyTarget();
+  roomSocket.chat(text, replyTarget);
+  clearReplyTarget();
   input.value = '';
   input.style.height = 'auto';
   input.focus({ preventScroll: true });
@@ -2217,7 +2341,108 @@ function getJumboEmojis(rawText) {
   return null;
 }
 
-function renderMessageContent(text) {
+let pingTitleTimer = null;
+let originalDocTitle = '';
+
+function flashTitleOnPing(alertText = '🔔 (1 Ping) WatchBeam') {
+  if (!document.hidden) return;
+  if (!originalDocTitle) originalDocTitle = document.title || 'WatchBeam';
+  if (pingTitleTimer) clearInterval(pingTitleTimer);
+
+  let isToggled = false;
+  pingTitleTimer = setInterval(() => {
+    document.title = isToggled ? alertText : originalDocTitle;
+    isToggled = !isToggled;
+  }, 1000);
+
+  const resetOnFocus = () => {
+    if (pingTitleTimer) {
+      clearInterval(pingTitleTimer);
+      pingTitleTimer = null;
+    }
+    if (originalDocTitle) document.title = originalDocTitle;
+    window.removeEventListener('focus', resetOnFocus);
+  };
+  window.addEventListener('focus', resetOnFocus);
+}
+
+function playPingChime() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = 'sine';
+    // Gentle 2-tone melodic bell: D5 (587Hz) ramp to A5 (880Hz)
+    osc.frequency.setValueAtTime(587.33, now);
+    osc.frequency.setValueAtTime(880.00, now + 0.08);
+
+    gain.gain.setValueAtTime(0.18, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.38);
+    osc.onended = () => ctx.close();
+  } catch {}
+}
+
+function parseChatMarkdown(escaped, currentUsername = '') {
+  let s = escaped;
+
+  // Code blocks: ```code```
+  s = s.replace(/```([\s\S]*?)```/g, '<pre class="chat-code-block"><code>$1</code></pre>');
+
+  // Inline code: `code`
+  s = s.replace(/`([^`\n]+)`/g, '<code class="chat-inline-code">$1</code>');
+
+  // Bold: **text**
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+
+  // Strikethrough: ~~text~~
+  s = s.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+
+  // Italics: *text* or _text_
+  s = s.replace(/(^|[^\w*])\*([^*\n]+)\*([^\w*]|$)/g, '$1<em>$2</em>$3');
+  s = s.replace(/(^|[^\w_])_([^_\n]+)_([^\w_]|$)/g, '$1<em>$2</em>$3');
+
+  // Bullet list lines
+  s = s.replace(/^[•\-]\s+(.*)$/gm, '<span class="chat-list-bullet">•</span> $1');
+
+  // Slash commands: /play, /pause, /resume, /skip, /next, /queue, /clear, /help, etc.
+  s = s.replace(/(^|\s)(\/(?:play|pause|resume|unpause|skip|next|queue|add|clear|help)\b[^\s<]*)/gi, (m, prefix, cmd) => {
+    return `${prefix}<span class="chat-cmd-pill">${cmd}</span>`;
+  });
+
+  // Mentions / Pings: @user, @ai, @bot
+  s = s.replace(/(^|\s)@([a-zA-Z0-9_-]+)/g, (match, prefix, user) => {
+    const uLower = user.toLowerCase();
+    const meLower = (currentUsername || getUsername() || '').toLowerCase();
+    const isMe = uLower === meLower;
+    const isAi = uLower === 'ai' || uLower === 'bot' || uLower === 'watchbot';
+    const tagClass = isMe ? 'chat-mention-me' : isAi ? 'chat-mention-ai' : 'chat-mention-user';
+    return `${prefix}<span class="chat-mention-pill ${tagClass}">@${user}</span>`;
+  });
+
+  // Links: [title](url) or standalone URLs
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s<)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="chat-link">$1</a>');
+  s = s.replace(/(^|[^">])(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer" class="chat-link">$2</a>');
+
+  // Line breaks
+  s = s.replace(/\n/g, '<br/>');
+
+  return s;
+}
+
+function renderMessageContent(text, currentUsername = '') {
   const jumbo = getJumboEmojis(text);
   if (jumbo) {
     const images = jumbo.map(e => {
@@ -2227,13 +2452,15 @@ function renderMessageContent(text) {
     return { isJumbo: true, html: images };
   }
 
-  let escaped = escHtml(text);
+  let formatted = escHtml(text);
+  formatted = parseChatMarkdown(formatted, currentUsername);
+
   for (const emoji of EMOJI_WHITELIST_KEYS) {
     const hex = ANIMATED_EMOJI_WHITELIST[emoji];
     const imgTag = `<img class="animated-emoji-inline" src="https://fonts.gstatic.com/s/e/notoemoji/latest/${hex}/512.webp" alt="${emoji}" loading="lazy" onerror="this.replaceWith(this.alt)" />`;
-    escaped = escaped.split(emoji).join(imgTag);
+    formatted = formatted.split(emoji).join(imgTag);
   }
-  return { isJumbo: false, html: escaped };
+  return { isJumbo: false, html: formatted };
 }
 
 let lastChatMessage = null;
@@ -2250,19 +2477,46 @@ function addChatMessage(msg) {
 
   const me = getUsername();
   const isSelf = msg.username === me;
-  const isHost = currentRoom?.creator && msg.username === currentRoom.creator;
-  const isMod = !isHost && (msg.role === 'mod' || (msg.username && msg.username.toLowerCase() === 'admin'));
+  const isBot = msg.role === 'ai' || msg.username === 'WatchBot';
+  const isHost = !isBot && currentRoom?.creator && msg.username === currentRoom.creator;
+  const isMod = !isBot && !isHost && (msg.role === 'mod' || (msg.username && msg.username.toLowerCase() === 'admin'));
 
-  const isGrouped = lastChatMessage &&
+  const meLower = (me || '').toLowerCase();
+  const isMentioned = Boolean(
+    meLower && (
+      (msg.text && msg.text.toLowerCase().includes(`@${meLower}`)) ||
+      (msg.replyTo && msg.replyTo.username && msg.replyTo.username.toLowerCase() === meLower)
+    )
+  );
+
+  const isGrouped = !msg.replyTo && lastChatMessage &&
     lastChatMessage.username === msg.username &&
     !lastChatMessage.isSystem &&
     (msg.ts - lastChatMessage.ts < 120000);
 
-  const { isJumbo, html: contentHtml } = renderMessageContent(msg.text);
+  const { isJumbo, html: contentHtml } = renderMessageContent(msg.text, me);
   const timeFormatted = formatTime(msg.ts);
+  const quoteHtml = renderQuoteHtml(msg.replyTo);
+
+  if (!isSelf && isMentioned) {
+    playPingChime();
+    flashTitleOnPing(`🔔 Ping from ${msg.username || 'user'}`);
+    if (activeSidebarTab !== 'chat') {
+      document.getElementById('tab-btn-chat')?.classList.add('has-unread-ping');
+      document.getElementById('mob-tab-chat')?.classList.add('has-unread-ping');
+    }
+  }
+
+  const pingBannerHtml = (!isSelf && isMentioned) ? `
+    <div class="chat-ping-banner">
+      <svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      <span>Mentioned you</span>
+    </div>
+  ` : '';
 
   const row = document.createElement('div');
-  row.className = `chat-row ${isSelf ? 'chat-row-self' : 'chat-row-other'} ${isGrouped ? 'grouped' : ''}`;
+  if (msg.id) row.id = `msg-${msg.id}`;
+  row.className = `chat-row ${isSelf ? 'chat-row-self' : 'chat-row-other'} ${isGrouped ? 'grouped' : ''} ${isMentioned ? 'is-mentioned' : ''} ${isBot ? 'chat-row-bot' : ''}`;
 
   if (isSelf) {
     row.innerHTML = `
@@ -2274,6 +2528,8 @@ function addChatMessage(msg) {
               <path fill="currentColor" d="M6.467 2.568L0 11.193V0h5.188c1.77 0 2.338 1.156 1.279 2.568z"/>
             </svg>
           ` : ''}
+          ${pingBannerHtml}
+          ${quoteHtml}
           ${isJumbo ? `
             <div class="chat-jumbo-body">
               <span class="chat-text">${contentHtml}</span>
@@ -2291,9 +2547,9 @@ function addChatMessage(msg) {
       </div>
     `;
   } else {
-    const avatarColor = getAvatarColor(msg.username);
-    const initial = (msg.username || '?').charAt(0).toUpperCase();
-    const senderColor = isHost ? '#fbbf24' : isMod ? '#22d3ee' : getSenderColor(msg.username);
+    const avatarColor = isBot ? 'linear-gradient(135deg, #a855f7, #6366f1)' : getAvatarColor(msg.username);
+    const initial = isBot ? '🤖' : (msg.username || '?').charAt(0).toUpperCase();
+    const senderColor = isBot ? '#c084fc' : isHost ? '#fbbf24' : isMod ? '#22d3ee' : getSenderColor(msg.username);
 
     row.innerHTML = `
       ${!isGrouped ? `
@@ -2312,9 +2568,11 @@ function addChatMessage(msg) {
             ` : ''}
             <div class="chat-sender-name" style="color: ${senderColor};">
               ${escHtml(msg.username)}
-              ${isHost ? '<span class="chat-role-pill role-host">HOST</span>' : isMod ? '<span class="chat-role-pill role-mod">MOD</span>' : ''}
+              ${isBot ? '<span class="chat-role-pill role-ai">🤖 AI</span>' : isHost ? '<span class="chat-role-pill role-host">HOST</span>' : isMod ? '<span class="chat-role-pill role-mod">MOD</span>' : ''}
             </div>
           ` : ''}
+          ${pingBannerHtml}
+          ${quoteHtml}
           ${isJumbo ? `
             <div class="chat-jumbo-body">
               <span class="chat-text">${contentHtml}</span>
@@ -2332,6 +2590,9 @@ function addChatMessage(msg) {
       </div>
     `;
   }
+
+  attachMessageInteractions(row, msg);
+  wireQuoteClicks(row);
 
   container.appendChild(row);
   container.scrollTop = container.scrollHeight;

@@ -1,6 +1,6 @@
 {
   "name": "watchhyperbeam-client",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Watch party app frontend",
   "type": "module",
   "scripts": {

@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { existsSync } from 'fs';
 import 'dotenv/config';
+import { searchYouTube, getSuggestions, fetchVideoTitle } from './ytSearch.js';
+import { isCommandOrAiTrigger, handleAiCommand } from './aiAgent.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -43,6 +45,8 @@ const rooms = new Map();
 
 // WebSocket clients: clients[ws] = { roomId, username }
 const clients = new Map();
+// Grace period timers for temporary disconnects: key = `${roomId}:${username}`
+const pendingDepartures = new Map();
 
 app.use(cors());
 app.use(express.json());
@@ -203,6 +207,31 @@ app.get('/api/rooms/:id', (req, res) => {
   });
 });
 
+// GET /api/yt/search?q=... — Free YouTube video search
+app.get('/api/yt/search', async (req, res) => {
+  const q = req.query.q;
+  if (!q) return res.json({ videos: [] });
+  try {
+    const videos = await searchYouTube(q, 8);
+    res.json({ videos });
+  } catch (err) {
+    console.error('[API] /yt/search error:', err.message);
+    res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+// GET /api/yt/suggest?q=... — Free live YouTube search autocompletions
+app.get('/api/yt/suggest', async (req, res) => {
+  const q = req.query.q;
+  if (!q) return res.json({ suggestions: [] });
+  try {
+    const suggestions = await getSuggestions(q);
+    res.json({ suggestions });
+  } catch (err) {
+    res.json({ suggestions: [] });
+  }
+});
+
 // POST /api/rooms/:id/switch-mode — select YouTube, Hyperbeam, or return to App Drawer
 app.post('/api/rooms/:id/switch-mode', async (req, res) => {
   const room = rooms.get(req.params.id);
@@ -332,6 +361,15 @@ wss.on('connection', (ws, req) => {
         const username = sanitize(msg.username);
         client.roomId = msg.roomId;
         client.username = username;
+
+        const depKey = `${room.id}:${username}`;
+        const wasReconnecting = pendingDepartures.has(depKey);
+        if (wasReconnecting) {
+          clearTimeout(pendingDepartures.get(depKey));
+          pendingDepartures.delete(depKey);
+        }
+
+        const isNewJoin = !room.users.has(username) || !wasReconnecting;
         room.users.add(username);
 
         const activeHb = getActiveHbCount();
@@ -352,15 +390,16 @@ wss.on('connection', (ws, req) => {
           },
         }));
 
-        // Notify room
-        broadcastToRoom(room.id, {
-          type: 'user_joined',
-          username,
-          userCount: room.users.size,
-          users: [...room.users],
-        });
-
-        console.log(`[WS] ${username} joined "${room.name}" (${room.users.size} viewers)`);
+        // Notify room if genuinely new join
+        if (isNewJoin) {
+          broadcastToRoom(room.id, {
+            type: 'user_joined',
+            username,
+            userCount: room.users.size,
+            users: [...room.users],
+          });
+          console.log(`[WS] ${username} joined "${room.name}" (${room.users.size} viewers)`);
+        }
         break;
       }
 
@@ -372,10 +411,17 @@ wss.on('connection', (ws, req) => {
         const text = sanitize(msg.text, 500);
         if (!text) return;
 
+        const msgId = msg.id || generateId();
         const chatMsg = {
+          id: msgId,
           type: 'chat',
           username: client.username,
           text,
+          replyTo: msg.replyTo && typeof msg.replyTo === 'object' ? {
+            id: sanitize(msg.replyTo.id, 32),
+            username: sanitize(msg.replyTo.username, 32),
+            text: sanitize(msg.replyTo.text, 120),
+          } : null,
           ts: Date.now(),
         };
 
@@ -383,6 +429,18 @@ wss.on('connection', (ws, req) => {
         if (room.messages.length > 200) room.messages.shift();
 
         broadcastToRoom(room.id, chatMsg);
+
+        // Check if message targets Discord slash commands or pseudo-AI (@ai / @bot)
+        if (isCommandOrAiTrigger(text)) {
+          handleAiCommand({
+            room,
+            client,
+            rawText: text,
+            userMsgId: msgId,
+            broadcastToRoom,
+            addSystemMessage,
+          }).catch(err => console.error('[AI] Handler error:', err));
+        }
         break;
       }
 
@@ -465,10 +523,18 @@ wss.on('connection', (ws, req) => {
           const cleanVid = sanitize(videoId, 64);
           if (!cleanVid) return;
           if (!room.queue) room.queue = [];
+
+          let title = sanitize(msg.title, 100);
+          if (!title || title.startsWith('YouTube (')) {
+            const resolved = await fetchVideoTitle(cleanVid);
+            if (resolved) title = resolved;
+          }
+          if (!title) title = `YouTube (${cleanVid})`;
+
           const item = {
             id: generateId(),
             videoId: cleanVid,
-            title: sanitize(msg.title, 100) || `YouTube (${cleanVid})`,
+            title,
             addedBy: client.username,
           };
           room.queue.push(item);
@@ -478,7 +544,7 @@ wss.on('connection', (ws, req) => {
             addedItem: item,
             username: client.username,
           });
-          addSystemMessage(room, `${client.username} added a video to queue 📋`);
+          addSystemMessage(room, `${client.username} added "${title}" to queue 📋`);
         } else if (action === 'queue_remove') {
           if (!room.queue) room.queue = [];
           const index = room.queue.findIndex(q => q.id === msg.itemId);
@@ -558,33 +624,47 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     const client = clients.get(ws);
+    clients.delete(ws);
     if (client?.roomId && client?.username) {
       const room = rooms.get(client.roomId);
       if (room) {
-        room.users.delete(client.username);
-        broadcastToRoom(room.id, {
-          type: 'user_left',
-          username: client.username,
-          userCount: room.users.size,
-          users: [...room.users],
-        });
-        console.log(`[WS] ${client.username} left "${room.name}" (${room.users.size} remaining)`);
-
-        // If room is now empty, schedule auto-deletion in 5 minutes to release Hyperbeam session & memory
-        if (room.users.size === 0) {
-          console.log(`[Room] "${room.name}" is now empty. Auto-cleanup scheduled in 5 minutes.`);
-          if (room.emptyTimeout) clearTimeout(room.emptyTimeout);
-          room.emptyTimeout = setTimeout(async () => {
-            if (room.users.size === 0) {
-              await terminateHbSession(room);
-              rooms.delete(room.id);
-              console.log(`[Room] Deleted inactive room "${room.name}" and released resources.`);
-            }
-          }, 5 * 60 * 1000);
+        const depKey = `${room.id}:${client.username}`;
+        if (pendingDepartures.has(depKey)) {
+          clearTimeout(pendingDepartures.get(depKey));
         }
+
+        // Grace period before announcing departure to absorb quick idle reconnects
+        const timer = setTimeout(() => {
+          pendingDepartures.delete(depKey);
+          const isStillConnected = [...clients.values()].some(c => c.roomId === room.id && c.username === client.username);
+          if (!isStillConnected) {
+            room.users.delete(client.username);
+            broadcastToRoom(room.id, {
+              type: 'user_left',
+              username: client.username,
+              userCount: room.users.size,
+              users: [...room.users],
+            });
+            console.log(`[WS] ${client.username} left "${room.name}" (${room.users.size} remaining)`);
+
+            // If room is now empty, schedule auto-deletion in 5 minutes
+            if (room.users.size === 0) {
+              console.log(`[Room] "${room.name}" is now empty. Auto-cleanup scheduled in 5 minutes.`);
+              if (room.emptyTimeout) clearTimeout(room.emptyTimeout);
+              room.emptyTimeout = setTimeout(async () => {
+                if (room.users.size === 0) {
+                  await terminateHbSession(room);
+                  rooms.delete(room.id);
+                  console.log(`[Room] Deleted inactive room "${room.name}" and released resources.`);
+                }
+              }, 5 * 60 * 1000);
+            }
+          }
+        }, 3500);
+
+        pendingDepartures.set(depKey, timer);
       }
     }
-    clients.delete(ws);
   });
 
   ws.on('error', (err) => console.error('[WS] Error:', err.message));

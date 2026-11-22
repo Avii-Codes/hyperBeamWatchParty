@@ -1,9 +1,10 @@
 {
   "name": "watchbeam",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Watch party app powered by HyperBeam",
   "scripts": {
     "install:all": "npm install --prefix server && npm install --prefix client",
+    "postinstall": "npm install --prefix server && npm install --prefix client",
     "build": "npm run build --prefix client",
     "start": "node server/index.js",
     "dev:server": "npm run dev --prefix server",
