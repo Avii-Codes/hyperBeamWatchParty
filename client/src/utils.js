@@ -9,10 +9,15 @@ export function setUsername(name) {
   localStorage.setItem(LS_USERNAME, name.trim().slice(0, 30));
 }
 
-// Time formatting
+// Time formatting (WhatsApp style: 3:48 pm without leading zeros on hour)
 export function formatTime(ts) {
   const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  let hours = d.getHours();
+  const minutes = d.getMinutes().toString().padStart(2, '0');
+  const ampm = hours >= 12 ? 'pm' : 'am';
+  hours = hours % 12;
+  hours = hours ? hours : 12;
+  return `${hours}:${minutes} ${ampm}`;
 }
 
 // Generate a shareable room URL
@@ -26,6 +31,15 @@ export function escHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+// Extract YouTube video ID from various link formats (short, long, embed, or ID)
+export function extractYouTubeId(urlOrId) {
+  if (!urlOrId) return null;
+  const str = urlOrId.trim();
+  if (/^[a-zA-Z0-9_-]{11}$/.test(str)) return str;
+  const match = str.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})/);
+  return match ? match[1] : null;
 }
 
 // Copy text to clipboard

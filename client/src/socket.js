@@ -56,6 +56,14 @@ export class RoomSocket {
     this.send({ type: 'chat', text });
   }
 
+  reaction(emoji) {
+    this.send({ type: 'reaction', emoji });
+  }
+
+  ytAction(action, data = {}) {
+    this.send({ type: 'yt_action', action, ...data });
+  }
+
   disconnect() {
     this._stopPing();
     this._ws?.close();
